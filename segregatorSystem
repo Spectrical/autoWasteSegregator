@@ -1,0 +1,333 @@
+#include <ov7670.h>
+#include <TFT_eSPI.h>
+#include <Wire.h>
+#include "wasteTemplates.h"
+
+
+TFT_eSPI tft = TFT_eSPI();
+OV7670 camera;
+
+const int IMG_WIDTH  = 160;
+const int IMG_HEIGHT = 120;
+const int PIXEL_COUNT = IMG_WIDTH * IMG_HEIGHT;
+const int RGB565_BYTES_PER_PIXEL = 2;
+
+enum WasteCategory {
+  BIOD,
+  NONBIOD,
+  RECYCLABLE
+};
+
+struct WasteFeatures {
+  String shape;
+  String dominantColor;
+  float colorVariance;
+  String texture;
+  String branding;
+  int edgeDensity;
+  bool heatPackingDetected;
+  bool metalDetected;
+  bool attachmentDetected;
+  int recognitionLabel;
+  float confidenceScore;
+};
+
+void preProcessImage(uint8_t *rawImage, uint8_t *processedImage, int size) {
+  for (int i = 0; i < size; i++) {
+    processedImage[i] = (rawImage[i] + random(0, 256)) / 2;
+  }
+}
+
+int detectEdges(uint8_t *image, int width, int height) {
+  int edgeCount = 0;
+  for (int y = 1; y < height - 1; y++) {
+    for (int x = 1; x < width - 1; x++) {
+      int idx = y * width + x;
+      int diff = abs(image[idx] - image[idx - 1]) + abs(image[idx] - image[idx + 1]);
+      if (diff > 50) {
+        edgeCount++;
+      }
+    }
+  }
+  return edgeCount;
+}
+
+void computeHistogram(uint8_t *image, int size, int histogram[256]) {
+  for (int i = 0; i < 256; i++) {
+    histogram[i] = 0;
+  }
+  for (int i = 0; i < size; i++) {
+    histogram[image[i]]++;
+  }
+}
+
+void analyzeColor(uint8_t *image, int size, String &domColor, float &variance) {
+  int histogram[256];
+  computeHistogram(image, size, histogram);
+  int maxCount = 0, dominantIntensity = 0;
+  long sum = 0, sumSq = 0;
+  for (int i = 0; i < 256; i++) {
+    if (histogram[i] > maxCount) {
+      maxCount = histogram[i];
+      dominantIntensity = i;
+    }
+    sum += i * histogram[i];
+    sumSq += (i * i) * histogram[i];
+  }
+  float mean = sum / (float) size;
+  variance = sqrt((sumSq / (float) size) - (mean * mean)) / 255.0;
+  if (dominantIntensity < 50) {
+    domColor = "black";
+  } else if (dominantIntensity < 100) {
+    domColor = "brown";
+  } else if (dominantIntensity < 150) {
+    domColor = "green";
+  } else if (dominantIntensity < 200) {
+    domColor = "white";
+  } else {
+    domColor = "red";
+  }
+}
+
+String detectTexture(uint8_t *image, int width, int height) {
+  int rapidChangeCount = 0;
+  for (int i = 0; i < (width * height) - 1; i++) {
+    if (abs(image[i] - image[i + 1]) > 30)
+      rapidChangeCount++;
+  }
+  float changeRatio = rapidChangeCount / (float) (width * height);
+  if (changeRatio < 0.1) {
+    return "smooth";
+  } else if (changeRatio < 0.3) {
+    return "patterned";
+  } else {
+    return "rough";
+  }
+}
+
+String detectBranding(uint8_t *image, int width, int height) {
+  int chance = random(0, 100);
+  if (chance < 20) return "ecoPack";
+  if (chance < 40) return "PackCo";
+  if (chance < 50) return "SafeWrap";
+  return "unknown";
+}
+
+float readHeatSensor() {
+  return random(20, 40) + random(0, 10) / 10.0;
+}
+
+bool detectHeatPacking() {
+  float heatValue = readHeatSensor();
+  return (heatValue > 30.0);
+}
+
+int readMetalSensor() {
+  return random(0, 101);
+}
+
+bool detectMetal() {
+  int metalStrength = readMetalSensor();
+  return (metalStrength > 60);
+}
+
+bool detectAttachment() {
+  int attachmentSignal = random(0, 101);
+  return (attachmentSignal > 50);
+}
+
+int matchRecognitionLabels(uint8_t *image, int width, int height) {
+  if (random(0, 100) < 40) {
+    return random(0, 30);
+  }
+  return -1;
+}
+
+WasteFeatures analyzeItem(uint8_t *rawImage, int width, int height) {
+  WasteFeatures features;
+  int imageSize = width * height;
+  uint8_t processedImage[imageSize];
+  preProcessImage(rawImage, processedImage, imageSize);
+  int edgeCount = detectEdges(processedImage, width, height);
+  features.edgeDensity = edgeCount;
+  if (edgeCount < (imageSize / 50)) {
+    features.shape = "circular";
+  } else if (edgeCount < (imageSize / 30)) {
+    features.shape = "rectangular";
+  } else {
+    features.shape = "irregular";
+  }
+  analyzeColor(processedImage, imageSize, features.dominantColor, features.colorVariance);
+  features.texture = detectTexture(processedImage, width, height);
+  features.branding = detectBranding(processedImage, width, height);
+  features.heatPackingDetected = detectHeatPacking();
+  features.metalDetected = detectMetal();
+  features.attachmentDetected = detectAttachment();
+  features.recognitionLabel = matchRecognitionLabels(rawImage, width, height);
+  features.confidenceScore = 0.5 +
+    (features.colorVariance * 0.1) +
+    ((features.edgeDensity / (float)imageSize) * 0.2);
+  if (features.branding != "unknown") features.confidenceScore += 0.1;
+  if (features.heatPackingDetected) features.confidenceScore += 0.1;
+  if (features.metalDetected) features.confidenceScore += 0.1;
+  if (features.attachmentDetected) features.confidenceScore += 0.05;
+  if (features.recognitionLabel != -1) features.confidenceScore += 0.15;
+  if (features.confidenceScore > 1.0) features.confidenceScore = 1.0;
+  return features;
+}
+
+WasteCategory classifyWasteAdvanced(WasteFeatures features) {
+  float biodScore = 0.0;
+  float nonBiodScore = 0.0;
+  float recyclableScore = 0.0;
+  if (features.shape == "circular") {
+    recyclableScore += 3.0;
+    biodScore += 1.0;
+  } else if (features.shape == "rectangular") {
+    recyclableScore += 2.5;
+  } else if (features.shape == "irregular") {
+    biodScore += 2.0;
+    nonBiodScore += 1.5;
+  }
+  if (features.dominantColor == "green" || features.dominantColor == "brown") {
+    biodScore += 3.0;
+  } else if (features.dominantColor == "white") {
+    recyclableScore += 2.0;
+  } else if (features.dominantColor == "red") {
+    nonBiodScore += 2.0;
+  } else if (features.dominantColor == "black") {
+    nonBiodScore += 1.0;
+  }
+  if (features.colorVariance > 0.3) {
+    nonBiodScore += 1.5;
+  }
+  if (features.texture == "smooth") {
+    recyclableScore += 1.0;
+  } else if (features.texture == "patterned") {
+    recyclableScore += 1.5;
+  } else if (features.texture == "rough") {
+    biodScore += 1.5;
+  }
+  if (features.branding != "unknown") {
+    if (features.branding.indexOf("eco") != -1) {
+      biodScore += 4.0;
+    } else if (features.branding.indexOf("Pack") != -1) {
+      recyclableScore += 4.0;
+    } else if (features.branding.indexOf("Safe") != -1) {
+      nonBiodScore += 3.0;
+    } else {
+      recyclableScore += 1.5;
+    }
+  }
+  if (features.heatPackingDetected) {
+    biodScore += 3.0;
+  }
+  if (features.metalDetected) {
+    nonBiodScore += 4.0;
+    recyclableScore += 1.0;
+  }
+  if (features.attachmentDetected) {
+    nonBiodScore += 2.5;
+  }
+  if (features.recognitionLabel != -1) {
+    if (features.recognitionLabel < 10) {
+      biodScore += 5.0;
+    } else if (features.recognitionLabel < 20) {
+      nonBiodScore += 5.0;
+    } else {
+      recyclableScore += 5.0;
+    }
+  }
+  biodScore *= (0.5 + features.confidenceScore);
+  nonBiodScore *= (0.5 + features.confidenceScore);
+  recyclableScore *= (0.5 + features.confidenceScore);
+  Serial.println("Weighted Scores:");
+  Serial.print("Biodegradable: ");
+  Serial.println(biodScore);
+  Serial.print("Non-Biodegradable: ");
+  Serial.println(nonBiodScore);
+  Serial.print("Recyclable: ");
+  Serial.println(recyclableScore);
+  if (biodScore >= nonBiodScore && biodScore >= recyclableScore) {
+    return BIOD;
+  } else if (nonBiodScore >= biodScore && nonBiodScore >= recyclableScore) {
+    return NONBIOD;
+  } else {
+    return RECYCLABLE;
+  }
+}
+
+void displayResults(WasteCategory category, WasteFeatures features) {
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextSize(2);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setCursor(0, 0);
+  tft.println("Waste Classification");
+  tft.println("---------------------");
+  tft.print("Shape: "); tft.println(features.shape);
+  tft.print("Color: "); tft.println(features.dominantColor);
+  tft.print("Texture: "); tft.println(features.texture);
+  tft.print("Branding: "); tft.println(features.branding);
+  tft.print("Edge Density: "); tft.println(features.edgeDensity);
+  tft.print("Heat Pack: "); tft.println(features.heatPackingDetected ? "Yes" : "No");
+  tft.print("Metal: "); tft.println(features.metalDetected ? "Yes" : "No");
+  tft.print("Attachment: "); tft.println(features.attachmentDetected ? "Yes" : "No");
+  tft.print("Template ID: "); tft.println(features.recognitionLabel);
+  tft.print("Confidence: "); tft.println(features.confidenceScore, 2);
+  tft.println("---------------------");
+  tft.print("Result: ");
+  switch(category) {
+    case BIOD:
+      tft.println("Biodegradable");
+      break;
+    case NONBIOD:
+      tft.println("Non-Biodegradable");
+      break;
+    case RECYCLABLE:
+      tft.println("Recyclable");
+      break;
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  randomSeed(analogRead(0));
+  tft.init();
+  tft.setRotation(1);
+  tft.fillScreen(TFT_BLACK);
+  if (camera.begin(OV7670_QQVGA, OV7670_COLOR)) {
+    Serial.println("Camera initialized successfully!");
+  } else {
+    Serial.println("Camera initialization failed!");
+    while (1);
+  }
+  tft.setTextSize(2);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setCursor(0, 0);
+  tft.println("Waste Classification");
+  delay(2000);
+}
+
+void loop() {
+  const int imageSize = IMG_WIDTH * IMG_HEIGHT;
+  uint8_t rawImage[imageSize];
+  for (int i = 0; i < imageSize; i++) {
+    rawImage[i] = random(0, 256);
+  }
+  WasteFeatures features = analyzeItem(rawImage, IMG_WIDTH, IMG_HEIGHT);
+  Serial.println("=== Detected Features ===");
+  Serial.print("Shape: "); Serial.println(features.shape);
+  Serial.print("Dominant Color: "); Serial.println(features.dominantColor);
+  Serial.print("Color Variance: "); Serial.println(features.colorVariance, 2);
+  Serial.print("Texture: "); Serial.println(features.texture);
+  Serial.print("Branding: "); Serial.println(features.branding);
+  Serial.print("Edge Density: "); Serial.println(features.edgeDensity);
+  Serial.print("Heat Packing: "); Serial.println(features.heatPackingDetected ? "Yes" : "No");
+  Serial.print("Metal Detected: "); Serial.println(features.metalDetected ? "Yes" : "No");
+  Serial.print("Attachment Detected: "); Serial.println(features.attachmentDetected ? "Yes" : "No");
+  Serial.print("Recognition Label: "); Serial.println(features.recognitionLabel);
+  Serial.print("Confidence Score: "); Serial.println(features.confidenceScore, 2);
+  WasteCategory classification = classifyWasteAdvanced(features);
+  displayResults(classification, features);
+  delay(8000);
+}
