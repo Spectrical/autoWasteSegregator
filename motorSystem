@@ -1,0 +1,40 @@
+#include <Stepper.h>
+#include <Servo.h>
+
+const int stepsPerRevolution = 2048;
+Stepper myStepper(stepsPerRevolution, 8, 10, 9, 11);
+
+Servo myServo;
+const int servoPin = 6;
+void setup() {
+  myStepper.setSpeed(10);
+  Serial.begin(9600);
+  Serial.println("Send 'F' to rotate Forward, 'B' to rotate Backward");
+  Serial.println("Send 'L' to turn Servo Left, 'R' to turn Servo Right");
+
+  myServo.attach(servoPin);
+  myServo.write(90); 
+}
+
+void loop() {
+  if (Serial.available()) {
+    char command = Serial.read();
+
+    if (command == 'F' || command == 'f') {
+      Serial.println("Rotating Stepper Forward...");
+      myStepper.step(stepsPerRevolution / 8);
+    } 
+    else if (command == 'B' || command == 'b') {
+      Serial.println("Rotating Stepper Backward...");
+      myStepper.step(-stepsPerRevolution / 8);
+    } 
+    else if (command == 'L' || command == 'l') {
+      Serial.println("Turning Servo Left...");
+      myServo.write(180); 
+    } 
+    else if (command == 'R' || command == 'r') {
+      Serial.println("Turning Servo Right...");
+      myServo.write(135); 
+    }
+  }
+}
